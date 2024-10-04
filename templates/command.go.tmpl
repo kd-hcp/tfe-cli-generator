@@ -1,0 +1,150 @@
+// templates/command.go.tmpl
+
+package cmd
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	{{- if .NeedsTFEImport }}
+	"github.com/hashicorp/go-tfe"
+	{{- end }}
+	{{- if .NeedsIOImport }}
+	"io"
+	{{- end }}
+	"github.com/spf13/cobra"
+)
+
+var {{ .CommandName }}Cmd = &cobra.Command{
+	Use:   "{{ .CommandName }}",
+	Short: "{{ .Short }}",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// Initialize context and client
+		ctx := context.Background()
+		client := getClient()
+
+		// Declare variables
+		var (
+			{{- range .Parameters }}
+			{{ .Name }} {{ .Type }}
+			{{- end }}
+			{{- if .NeedsOptions }}
+			options *tfe.{{ .OptionsType }}
+			{{- end }}
+			err error
+			{{- if and .HasResult .HasError }}
+			result {{ range .Returns }}{{ if not (eq .Type "error") }}{{ .Type }}{{ end }}{{ end }}
+			{{- end }}
+		)
+
+		// Parse flags
+		{{- range .Parameters }}
+		{{- if eq .Type "string" }}
+		{{ .Name }}, err = cmd.Flags().GetString("{{ .Name }}")
+		{{- else if eq .Type "int" }}
+		{{ .Name }}, err = cmd.Flags().GetInt("{{ .Name }}")
+		{{- else if eq .Type "bool" }}
+		{{ .Name }}, err = cmd.Flags().GetBool("{{ .Name }}")
+		{{- else if .IsIO }}
+		// Example for io.Reader or io.Writer
+		{{ .Name }}Str, err := cmd.Flags().GetString("{{ .Name }}")
+		if err != nil {
+			log.Printf("Error getting flag '{{ .Name }}': %v", err)
+			return err
+		}
+		// Convert string to io.Reader or io.Writer as needed
+		{{ if eq .Type "io.Reader" }}
+		{{ .Name }} = stringsNewReader({{ .Name }}Str)
+		{{- else if eq .Type "io.Writer" }}
+		// Example: using os.Stdout as io.Writer
+		{{ .Name }} = os.Stdout
+		{{- end }}
+		{{- else }}
+		// Handle non-basic types
+		// TODO: Implement parsing for {{ .Name }} of type {{ .Type }}
+		{{- end }}
+		if err != nil {
+			log.Printf("Error getting flag '{{ .Name }}': %v", err)
+			return err
+		}
+		log.Printf("Flag '{{ .Name }}' value: %v", {{ .Name }})
+		{{- end }}
+
+		// Initialize options if needed
+		{{- if .NeedsOptions }}
+		options = &tfe.{{ .OptionsType }}{
+			{{- range .OptionsFields }}
+			{{ .Name }}: {{ .Name }},
+			{{- end }}
+		}
+		// TODO: Parse and assign fields to options struct based on flags
+		log.Printf("Options: %+v", options)
+		{{- end }}
+
+		// Call the API method
+		{{- if and .HasResult .HasError }}
+		result, err = client.{{ .ServiceName }}.{{ .Use }}(ctx{{- range .Parameters }}, {{ .Name }}{{- end }}{{- if .NeedsOptions }}, options{{- end }})
+		{{- else if and (not .HasResult) .HasError }}
+		err = client.{{ .ServiceName }}.{{ .Use }}(ctx{{- range .Parameters }}, {{ .Name }}{{- end }}{{- if .NeedsOptions }}, options{{- end }})
+		{{- else if and .HasResult (not .HasError) }}
+		result = client.{{ .ServiceName }}.{{ .Use }}(ctx{{- range .Parameters }}, {{ .Name }}{{- end }}{{- if .NeedsOptions }}, options{{- end }})
+		{{- end }}
+		if err != nil {
+			log.Printf("API call failed: %v", err)
+			return err
+		}
+
+		// Output the result
+		{{- if .HasResult }}
+		fmt.Printf("%+v\n", result)
+		{{- else }}
+		fmt.Println("Operation completed successfully.")
+		{{- end }}
+		return nil
+	},
+}
+
+func init() {
+	rootCmd.AddCommand({{ .CommandName }}Cmd)
+
+	// Define flags
+	{{- $cmdName := .CommandName }}
+	{{- range .Parameters }}
+	{{- if eq .Type "string" }}
+	{{ $cmdName }}Cmd.Flags().String("{{ .Name }}", "", "Description for {{ .Name }}")
+	{{- else if eq .Type "int" }}
+	{{ $cmdName }}Cmd.Flags().Int("{{ .Name }}", 0, "Description for {{ .Name }}")
+	{{- else if eq .Type "bool" }}
+	{{ $cmdName }}Cmd.Flags().Bool("{{ .Name }}", false, "Description for {{ .Name }}")
+	{{- else if .IsIO }}
+	// Example for io.Reader or io.Writer flags
+	{{ $cmdName }}Cmd.Flags().String("{{ .Name }}", "", "Description for {{ .Name }} (expects a file path)")
+	{{- else }}
+	// Handle non-basic types
+	// TODO: Implement flag parsing for {{ .Name }} of type {{ .Type }}
+	// Example:
+	// {{ $cmdName }}Cmd.Flags().String("{{ .Name }}", "", "Description for {{ .Name }}")
+	{{- end }}
+	{{- end }}
+
+	{{- if .NeedsOptions }}
+	{{- range .OptionsFields }}
+	{{- if eq .Type "string" }}
+	{{ $cmdName }}Cmd.Flags().String("{{ .Name }}", "", "Description for {{ .Name }}")
+	{{- else if eq .Type "int" }}
+	{{ $cmdName }}Cmd.Flags().Int("{{ .Name }}", 0, "Description for {{ .Name }}")
+	{{- else if eq .Type "bool" }}
+	{{ $cmdName }}Cmd.Flags().Bool("{{ .Name }}", false, "Description for {{ .Name }}")
+	{{- else if .IsIO }}
+	// Example for io.Reader or io.Writer within Options
+	{{ $cmdName }}Cmd.Flags().String("{{ .Name }}", "", "Description for {{ .Name }} (expects a file path)")
+	{{- else }}
+	// Handle non-basic types within Options
+	// TODO: Implement flag parsing for {{ .Name }} of type {{ .Type }}
+	// Example:
+	// {{ $cmdName }}Cmd.Flags().String("{{ .Name }}", "", "Description for {{ .Name }}")
+	{{- end }}
+	{{- end }}
+	{{- end }}
+}

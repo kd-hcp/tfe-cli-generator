@@ -1,0 +1,38 @@
+package cmd
+
+import (
+    "fmt"
+    "log"
+    "os"
+
+    "github.com/hashicorp/go-tfe"
+    "github.com/spf13/cobra"
+)
+
+var rootCmd = &cobra.Command{
+    Use:   "tfe-cli",
+    Short: "CLI for interacting with Terraform Enterprise",
+    Long:  `A command-line interface for interacting with the Terraform Enterprise API.`,
+}
+
+// Execute executes the root command.
+func Execute() {
+    if err := rootCmd.Execute(); err != nil {
+        fmt.Println(err)
+        os.Exit(1)
+    }
+}
+
+// getClient initializes and returns a TFE client.
+func getClient() *tfe.Client {
+    config := &tfe.Config{
+        Token: os.Getenv("TFE_TOKEN"), // or retrieve from flags or config
+    }
+
+    client, err := tfe.NewClient(config)
+    if err != nil {
+        log.Fatalf("Failed to create TFE client: %v", err)
+    }
+
+    return client
+}
