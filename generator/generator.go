@@ -1,5 +1,3 @@
-// generator/generator.go
-
 package generator
 
 import (
@@ -36,11 +34,9 @@ type CommandData struct {
 	NeedsOptions         bool
 	OptionsType          string
 	OptionsFields        []OptionsField
-	NeedsTFEImport       bool
-	NeedsIOImport        bool
 	HasResult            bool
 	HasError             bool
-	AdditionalImports    []string
+	Imports              map[string]bool
 	GeneratedCommandFile string
 	ServiceDescription   string
 	CommandDescription   string
@@ -79,12 +75,7 @@ func prefixType(typeStr string) string {
 	}
 	// Handle map
 	if strings.HasPrefix(typeStr, "map[") {
-		// Find the closing ']'
 		endIdx := strings.Index(typeStr, "]")
-		if endIdx == -1 {
-			// Invalid map type
-			return typeStr
-		}
 		keyType := typeStr[4:endIdx]
 		valueType := typeStr[endIdx+1:]
 		return fmt.Sprintf("map[%s]%s", prefixType(keyType), prefixType(valueType))
@@ -110,9 +101,7 @@ func prefixType(typeStr string) string {
 
 // getBaseType extracts the base type name from a qualified type string.
 func getBaseType(typeStr string) string {
-	// Remove pointer if present
 	typeStr = strings.TrimPrefix(typeStr, "*")
-	// Remove package prefix
 	parts := strings.Split(typeStr, ".")
 	return parts[len(parts)-1]
 }
@@ -180,8 +169,6 @@ func Generate(goTfePath string) error {
 	}
 
 	log.Info("Code generation completed successfully")
-
-	// Print the summary log
 	printSummary(summary)
 
 	return nil
@@ -250,7 +237,7 @@ func getAllServiceTypes(goTfePath string) (map[string]string, error) {
 			fieldType := exprToString(field.Type)
 			baseType := getBaseType(fieldType)
 
-			// **New Check:** Ensure the baseType is exported
+			// Ensure the baseType is exported
 			if !isExported(baseType) {
 				log.Debugf("Skipping unexported service field: %s of type %s", fieldName, baseType)
 				continue
@@ -367,7 +354,7 @@ func getServiceMethods(goTfePath string, serviceTypes map[string]string) (map[st
 				continue
 			}
 
-			// **New Check:** Skip unexported methods
+			// Skip unexported methods
 			if !isExported(funcDecl.Name.Name) {
 				log.Debugf("Skipping unexported method: %s", funcDecl.Name.Name)
 				continue
@@ -404,114 +391,66 @@ func processMethod(goTfePath string, structName string, interfaceName string, me
 	methodName := method.Name.Name
 	log.Infof("Processing method: %s.%s", structName, methodName)
 
-	// Verify if the method exists in the go-tfe package (redundant since we already filtered unexported)
-	// Optional: Additional checks can be added here
-
-	// method.Type is already *ast.FuncType; no need for type assertion
 	funcType := method.Type
 
 	params, optionsParam := extractParametersFromFuncType(funcType)
 	returns := extractReturnsFromFuncType(funcType)
 
-	log.Debugf("Extracted %d parameter(s) for method %s.%s", len(params), structName, methodName)
-	for _, p := range params {
-		log.Debugf("Parameter: %s %s", p.Name, p.Type)
-	}
-	log.Debugf("Extracted %d return value(s) for method %s.%s", len(returns), structName, methodName)
-	for _, r := range returns {
-		log.Debugf("Return: %s %s", r.Name, r.Type)
-	}
-
-	// Determine return types
-	hasResult := false
-	hasError := false
-	for _, ret := range returns {
-		if ret.Type != "error" && !strings.HasPrefix(ret.Type, "error") {
-			hasResult = true
-		} else if ret.Type == "error" {
-			hasError = true
-		}
-	}
+	// Determine if the method has a result or error
+	hasResult := hasResult(returns)
+	hasError := hasError(returns)
 
 	// Determine if options are needed
 	needsOptions := optionsParam != nil
 	optionsType := ""
 	optionsFields := []OptionsField{}
-	needsTFEImport := false
-	needsIOImport := false
-	additionalImports := []string{}
+
+	imports := map[string]bool{
+		"fmt":                    true,
+		"github.com/spf13/cobra": true,
+	}
 
 	if needsOptions {
-		// Remove the "*tfe." prefix to get the base type name
 		optionsType = strings.TrimPrefix(optionsParam.Type, "*tfe.")
-		needsTFEImport = true
-
-		// Extract fields from the Options struct
-		optionsFields, err := getOptionsFields(goTfePath, optionsType)
-		if err != nil {
-			log.Errorf("Error extracting fields from Options struct %s: %v", optionsType, err)
-			summary.Errors = append(summary.Errors, fmt.Sprintf("Error extracting fields from Options struct %s: %v", optionsType, err))
-			return err
-		}
-
-		log.Debugf("Processed OptionsType: %s with %d field(s)", optionsType, len(optionsFields))
+		optionsFields, _ = getOptionsFields(goTfePath, optionsType)
+		imports["github.com/hashicorp/go-tfe"] = true
 	}
 
-	// Check if any parameter types require tfe or io import
 	for _, param := range params {
-		if strings.HasPrefix(param.Type, "tfe.") {
-			needsTFEImport = true
-		}
 		if param.IsIO {
-			needsIOImport = true
+			imports["os"] = true
+			imports["io"] = true
 		}
 	}
 
-	// Check if return types require tfe or io import
 	for _, ret := range returns {
-		if strings.HasPrefix(ret.Type, "*tfe.") || strings.HasPrefix(ret.Type, "tfe.") {
-			needsTFEImport = true
+		if ret.Type == "io.Reader" || ret.Type == "io.Writer" {
+			imports["io"] = true
 		}
-		if strings.Contains(ret.Type, "io.") {
-			needsIOImport = true
-		}
-	}
-
-	// Collect additional imports based on parameter and return types
-	if needsTFEImport {
-		additionalImports = append(additionalImports, `"github.com/hashicorp/go-tfe"`)
-	}
-	if needsIOImport {
-		additionalImports = append(additionalImports, `"io"`)
 	}
 
 	commandData := CommandData{
-		CommandName:          strings.ToLower(interfaceName + "_" + methodName), // Use interfaceName
+		CommandName:          strings.ToLower(interfaceName + "_" + methodName),
 		Use:                  methodName,
 		Short:                fmt.Sprintf("Execute the %s.%s API method", interfaceName, methodName),
-		ServiceName:          interfaceName, // Use interfaceName instead of structName
+		ServiceName:          interfaceName,
 		Parameters:           params,
 		Returns:              returns,
 		NeedsOptions:         needsOptions,
 		OptionsType:          optionsType,
 		OptionsFields:        optionsFields,
-		NeedsTFEImport:       needsTFEImport,
-		NeedsIOImport:        needsIOImport,
 		HasResult:            hasResult,
 		HasError:             hasError,
-		AdditionalImports:    additionalImports,
+		Imports:              imports,
 		GeneratedCommandFile: filepath.Join(outputDir, "cmd", strings.ToLower(interfaceName+"_"+methodName)+".go"),
-		ServiceDescription:   fmt.Sprintf("%s service commands.", interfaceName),
-		CommandDescription:   fmt.Sprintf("Command to execute the %s.%s API method.", interfaceName, methodName),
 	}
 
 	err := generateCommandFile(commandData, outputDir)
 	if err != nil {
 		log.Errorf("Error generating command file for method %s.%s: %v", interfaceName, methodName, err)
-		return fmt.Errorf("error generating command file: %v", err)
+		return err
 	}
 
-	// Add the generated file to the summary
 	summary.GeneratedFiles = append(summary.GeneratedFiles, commandData.GeneratedCommandFile)
 	log.Infof("Generated command for method: %s.%s", interfaceName, methodName)
 	return nil
@@ -523,11 +462,10 @@ func extractParametersFromFuncType(funcType *ast.FuncType) (params []Parameter, 
 	for _, field := range funcType.Params.List {
 		paramType := exprToString(field.Type)
 		paramType = prefixType(paramType)
+
 		// Determine if the parameter type starts with "io."
-		if paramType == "context.Context" {
-			// Skip context parameter
-			continue
-		}
+		isIO := strings.HasPrefix(paramType, "io.")
+
 		paramNames := field.Names
 		if len(paramNames) == 0 {
 			// Generate a parameter name
@@ -537,7 +475,6 @@ func extractParametersFromFuncType(funcType *ast.FuncType) (params []Parameter, 
 		}
 		for _, name := range paramNames {
 			paramName := name.Name
-			// Identify if this parameter is an Options type
 			if strings.HasPrefix(paramType, "*tfe.") && strings.HasSuffix(paramType, "Options") {
 				optionsParam = &Parameter{
 					Name: paramName,
@@ -545,7 +482,6 @@ func extractParametersFromFuncType(funcType *ast.FuncType) (params []Parameter, 
 					IsIO: false, // Options types are not IO types
 				}
 			} else {
-				isIO := strings.HasPrefix(paramType, "io.")
 				params = append(params, Parameter{
 					Name: paramName,
 					Type: paramType,
@@ -580,125 +516,24 @@ func extractReturnsFromFuncType(funcType *ast.FuncType) []Return {
 	return returns
 }
 
-// getOptionsFields parses the `go-tfe` package and extracts fields of a given Options struct.
-func getOptionsFields(goTfePath, optionsTypeName string) ([]OptionsField, error) {
-	var fields []OptionsField
-
-	// Traverse all .go files in goTfePath to find the OptionsType struct
-	err := filepath.Walk(goTfePath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			log.Errorf("Error accessing path %s: %v", path, err)
-			return err
+// hasResult checks if the command has a result return.
+func hasResult(returns []Return) bool {
+	for _, ret := range returns {
+		if ret.Type != "error" {
+			return true
 		}
-		if info.IsDir() || !strings.HasSuffix(info.Name(), ".go") || strings.HasSuffix(info.Name(), "_test.go") {
-			return nil
-		}
-
-		fset := token.NewFileSet()
-		file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
-		if err != nil {
-			log.Errorf("Failed to parse file %s: %v", path, err)
-			return fmt.Errorf("failed to parse file %s: %v", path, err)
-		}
-
-		// Traverse the AST to find the Options struct
-		for _, decl := range file.Decls {
-			genDecl, ok := decl.(*ast.GenDecl)
-			if !ok || genDecl.Tok != token.TYPE {
-				continue
-			}
-			for _, spec := range genDecl.Specs {
-				typeSpec, ok := spec.(*ast.TypeSpec)
-				if !ok || typeSpec.Name.Name != optionsTypeName {
-					continue
-				}
-				structType, ok := typeSpec.Type.(*ast.StructType)
-				if !ok {
-					continue
-				}
-				for _, field := range structType.Fields.List {
-					// Assuming each field has a name
-					if len(field.Names) == 0 {
-						continue
-					}
-					fieldName := field.Names[0].Name
-					fieldType := exprToString(field.Type)
-					fieldType = prefixType(fieldType)
-
-					// Optional: Extract field tags or comments for descriptions
-					description := ""
-					if field.Doc != nil && len(field.Doc.List) > 0 {
-						// Assuming the first comment line is the description
-						description = strings.TrimSpace(strings.TrimPrefix(field.Doc.List[0].Text, "//"))
-					} else if field.Comment != nil && len(field.Comment.List) > 0 {
-						description = strings.TrimSpace(strings.TrimPrefix(field.Comment.List[0].Text, "//"))
-					}
-
-					fields = append(fields, OptionsField{
-						Name:        fieldName,
-						Type:        fieldType,
-						Description: description,
-					})
-				}
-			}
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
-
-	if len(fields) == 0 {
-		return nil, fmt.Errorf("Options struct %s not found in go-tfe package", optionsTypeName)
-	}
-
-	log.Infof("Extracted %d field(s) from Options struct %s", len(fields), optionsTypeName)
-	return fields, nil
+	return false
 }
 
-// exprToString converts an expression to its string representation.
-func exprToString(expr ast.Expr) string {
-	var buf bytes.Buffer
-	err := printer.Fprint(&buf, token.NewFileSet(), expr)
-	if err != nil {
-		return ""
+// hasError checks if the command has an error return.
+func hasError(returns []Return) bool {
+	for _, ret := range returns {
+		if ret.Type == "error" {
+			return true
+		}
 	}
-	return buf.String()
-}
-
-// isExported checks if a name is exported.
-func isExported(name string) bool {
-	return ast.IsExported(name)
-}
-
-// isBasicType checks if a type is a basic Go type.
-func isBasicType(t string) bool {
-	basicTypes := map[string]bool{
-		// Primitive types
-		"bool":       true,
-		"string":     true,
-		"int":        true,
-		"int8":       true,
-		"int16":      true,
-		"int32":      true,
-		"int64":      true,
-		"uint":       true,
-		"uint8":      true,
-		"uint16":     true,
-		"uint32":     true,
-		"uint64":     true,
-		"uintptr":    true,
-		"byte":       true, // Alias for uint8
-		"rune":       true, // Alias for int32
-		"float32":    true,
-		"float64":    true,
-		"complex64":  true,
-		"complex128": true,
-		"error":      true,
-		// Add more built-in types if necessary
-	}
-	return basicTypes[t]
+	return false
 }
 
 // generateCommandFile generates a command file from a template.
@@ -735,89 +570,266 @@ func generateRootCommand(outputDir string) error {
 
 // prepareOutputDir prepares the output directory.
 func prepareOutputDir(outputDir string) error {
-	log.Debugf("Preparing output directory: %s", outputDir)
 	cmdDir := filepath.Join(outputDir, "cmd")
 	if err := os.RemoveAll(cmdDir); err != nil {
-		log.Errorf("Failed to clean cmd directory: %v", err)
 		return fmt.Errorf("failed to clean cmd directory: %v", err)
 	}
 	if err := os.MkdirAll(cmdDir, os.ModePerm); err != nil {
-		log.Errorf("Failed to create cmd directory: %v", err)
 		return fmt.Errorf("failed to create cmd directory: %v", err)
 	}
-	log.Debugf("Created cmd directory: %s", cmdDir)
 	return nil
 }
 
 // generateFileFromTemplate generates a file from a template.
 func generateFileFromTemplate(templatePath, outputPath string, data interface{}) error {
-	// Define the FuncMap with necessary functions
 	funcMap := template.FuncMap{
-		"stringsNewReader":       strings.NewReader,
 		"stringsToLower":         strings.ToLower,
-		"stringsHasPrefix":       strings.HasPrefix,
-		"stringsHasSuffix":       strings.HasSuffix,
-		"stringsReplace":         strings.Replace,
-		"stringsSplit":           strings.Split,
-		"stringsJoin":            strings.Join,
-		"stringsContains":        strings.Contains,
-		"stringsTrimSpace":       strings.TrimSpace,
-		"stringsTitle":           strings.Title,
-		"stringsToUpper":         strings.ToUpper,
 		"stringsTrimPrefix":      strings.TrimPrefix,
-		"stringsTrimSuffix":      strings.TrimSuffix,
-		"stringsIndex":           strings.Index,
-		"stringsLastIndex":       strings.LastIndex,
-		"stringsRepeat":          strings.Repeat,
-		"stringsCount":           strings.Count,
-		"stringsMap":             strings.Map,
-		"stringsFields":          strings.Fields,
-		"stringsFieldsFunc":      strings.FieldsFunc,
-		"stringsReplaceAll":      strings.ReplaceAll,
-		"ToCamelCase":            toCamelCase,
-		"ToSnakeCase":            toSnakeCase,
-		"ToTitleCase":            toTitleCase,
-		"IsBasicType":            isBasicType,
-		"HasError":               hasError,
-		"HasResult":              hasResult,
+		"stringsTitle":           strings.Title,
 		"GenerateImports":        generateImports,
 		"GenerateFlags":          generateFlags,
 		"GenerateOptionsParsing": generateOptionsParsing,
+		"ToTitleCase":            toTitleCase,
+		"defaultValue":           defaultValue,
+		"stripSlicePrefix":       stripSlicePrefix,
 	}
 
 	tmpl, err := template.New(filepath.Base(templatePath)).Funcs(funcMap).ParseFiles(templatePath)
 	if err != nil {
-		log.Errorf("Failed to parse template %s: %v", templatePath, err)
 		return fmt.Errorf("failed to parse template %s: %v", templatePath, err)
 	}
 
-	// Debug log to inspect data
-	log.Debugf("Data passed to template: %+v", data)
-
 	f, err := os.Create(outputPath)
 	if err != nil {
-		log.Errorf("Failed to create file %s: %v", outputPath, err)
 		return fmt.Errorf("failed to create file %s: %v", outputPath, err)
 	}
 	defer f.Close()
 
 	err = tmpl.Execute(f, data)
 	if err != nil {
-		log.Errorf("Failed to execute template for file %s: %v", outputPath, err)
 		return fmt.Errorf("failed to execute template: %v", err)
 	}
 
 	log.Debugf("Successfully generated file: %s", outputPath)
 	return nil
 }
-
-// toCamelCase converts a snake_case string to CamelCase.
-func toCamelCase(s string) string {
-	parts := strings.Split(s, "_")
-	for i, p := range parts {
-		parts[i] = strings.Title(p)
+func stripSlicePrefix(typeStr string) string {
+	return strings.TrimPrefix(typeStr, "[]")
+}
+func defaultValue(typ string) string {
+	switch typ {
+	case "string":
+		return `""`
+	case "int", "int8", "int16", "int32", "int64":
+		return "0"
+	case "bool":
+		return "false"
+	case "float32", "float64":
+		return "0.0"
+	case "io.Reader", "io.Writer":
+		return "nil"
+	default:
+		// Fallback for other complex types (like structs, slices, etc.)
+		return "nil"
 	}
-	return strings.Join(parts, "")
+}
+
+// getOptionsFields extracts fields of a given Options struct.
+func getOptionsFields(goTfePath, optionsTypeName string) ([]OptionsField, error) {
+	var fields []OptionsField
+
+	err := filepath.Walk(goTfePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(info.Name(), ".go") || strings.HasSuffix(info.Name(), "_test.go") {
+			return nil
+		}
+
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if err != nil {
+			return fmt.Errorf("failed to parse file %s: %v", path, err)
+		}
+
+		for _, decl := range file.Decls {
+			genDecl, ok := decl.(*ast.GenDecl)
+			if !ok || genDecl.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range genDecl.Specs {
+				typeSpec, ok := spec.(*ast.TypeSpec)
+				if !ok || typeSpec.Name.Name != optionsTypeName {
+					continue
+				}
+				structType, ok := typeSpec.Type.(*ast.StructType)
+				if !ok {
+					continue
+				}
+				for _, field := range structType.Fields.List {
+					if len(field.Names) == 0 {
+						continue
+					}
+					fieldName := field.Names[0].Name
+					fieldType := exprToString(field.Type)
+					fieldType = prefixType(fieldType)
+
+					description := ""
+					if field.Doc != nil && len(field.Doc.List) > 0 {
+						description = strings.TrimSpace(strings.TrimPrefix(field.Doc.List[0].Text, "//"))
+					} else if field.Comment != nil && len(field.Comment.List) > 0 {
+						description = strings.TrimSpace(strings.TrimPrefix(field.Comment.List[0].Text, "//"))
+					}
+
+					fields = append(fields, OptionsField{
+						Name:        fieldName,
+						Type:        fieldType,
+						Description: description,
+					})
+				}
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return fields, nil
+}
+
+// exprToString converts an expression to its string representation.
+func exprToString(expr ast.Expr) string {
+	var buf bytes.Buffer
+	_ = printer.Fprint(&buf, token.NewFileSet(), expr)
+	return buf.String()
+}
+
+// isExported checks if a name is exported.
+func isExported(name string) bool {
+	return ast.IsExported(name)
+}
+
+// isBasicType checks if a type is a basic Go type.
+func isBasicType(t string) bool {
+	basicTypes := map[string]bool{
+		"bool":       true,
+		"string":     true,
+		"int":        true,
+		"int8":       true,
+		"int16":      true,
+		"int32":      true,
+		"int64":      true,
+		"uint":       true,
+		"uint8":      true,
+		"uint16":     true,
+		"uint32":     true,
+		"uint64":     true,
+		"uintptr":    true,
+		"byte":       true,
+		"rune":       true,
+		"float32":    true,
+		"float64":    true,
+		"complex64":  true,
+		"complex128": true,
+		"error":      true,
+	}
+	return basicTypes[t]
+}
+
+// generateImports dynamically collects the imports based on CommandData fields.
+func generateImports(data CommandData) []string {
+	imports := make(map[string]bool)
+
+	// Base imports
+	imports["context"] = true
+	imports["log"] = true
+	imports["fmt"] = true
+
+	// Dynamically add required imports based on parameters and returns
+	for _, param := range data.Parameters {
+		// Add "io" import if the type involves io.Reader or io.Writer
+		if param.Type == "io.Reader" || param.Type == "io.Writer" {
+			imports["io"] = true
+		}
+		// Add "os" import if needed for io.Writer cases like os.Stdout
+		if param.IsIO {
+			imports["os"] = true
+		}
+		if strings.HasPrefix(param.Type, "tfe.") || strings.HasPrefix(param.Type, "*tfe.") {
+			imports["github.com/hashicorp/go-tfe"] = true
+		}
+	}
+
+	for _, ret := range data.Returns {
+		if ret.Type == "io.Reader" || ret.Type == "io.Writer" {
+			imports["io"] = true
+		}
+		if strings.HasPrefix(ret.Type, "tfe.") || strings.HasPrefix(ret.Type, "*tfe.") {
+			imports["github.com/hashicorp/go-tfe"] = true
+		}
+	}
+
+	// Add "github.com/spf13/cobra" for cobra command usage
+	imports["github.com/spf13/cobra"] = true
+
+	// Add tfe import if needed
+	if data.NeedsOptions || len(data.OptionsFields) > 0 {
+		imports["github.com/hashicorp/go-tfe"] = true
+	}
+
+	// Convert map to slice of strings
+	importList := []string{}
+	for imp := range imports {
+		importList = append(importList, imp)
+	}
+
+	return importList
+}
+
+// generateFlags generates the flag definitions based on the parameters.
+func generateFlags(data CommandData) string {
+	var flags []string
+	for _, param := range data.Parameters {
+		flagName := toSnakeCase(param.Name)
+		switch param.Type {
+		case "string":
+			flags = append(flags, fmt.Sprintf(`cmd.Flags().String("%s", "", "Description for %s")`, flagName, param.Name))
+		case "int":
+			flags = append(flags, fmt.Sprintf(`cmd.Flags().Int("%s", 0, "Description for %s")`, flagName, param.Name))
+		case "bool":
+			flags = append(flags, fmt.Sprintf(`cmd.Flags().Bool("%s", false, "Description for %s")`, flagName, param.Name))
+		case "io.Reader", "io.Writer":
+			flags = append(flags, fmt.Sprintf(`cmd.Flags().String("%s", "", "Description for %s (expects file path)")`, flagName, param.Name))
+		default:
+			flags = append(flags, fmt.Sprintf(`// TODO: Add flag for %s (%s)`, param.Name, param.Type))
+		}
+	}
+	return strings.Join(flags, "\n\t")
+}
+
+// generateOptionsParsing generates the code to parse options from flags.
+func generateOptionsParsing(data CommandData) string {
+	if !data.NeedsOptions {
+		return ""
+	}
+	var parsing []string
+	for _, field := range data.OptionsFields {
+		flagName := toSnakeCase(field.Name)
+		switch field.Type {
+		case "string":
+			parsing = append(parsing, fmt.Sprintf(`options.%s, _ = cmd.Flags().GetString("%s")`, field.Name, flagName))
+		case "int":
+			parsing = append(parsing, fmt.Sprintf(`options.%s, _ = cmd.Flags().GetInt("%s")`, field.Name, flagName))
+		case "bool":
+			parsing = append(parsing, fmt.Sprintf(`options.%s, _ = cmd.Flags().GetBool("%s")`, field.Name, flagName))
+		default:
+			parsing = append(parsing, fmt.Sprintf(`// TODO: Parse flag for %s (%s)`, field.Name, field.Type))
+		}
+	}
+	return strings.Join(parsing, "\n\t")
 }
 
 // toSnakeCase converts a CamelCase string to snake_case.
@@ -830,11 +842,6 @@ func toSnakeCase(s string) string {
 		result = append(result, toLower(r))
 	}
 	return string(result)
-}
-
-// toTitleCase converts a string to Title Case.
-func toTitleCase(s string) string {
-	return strings.Title(s)
 }
 
 // isUpper checks if a rune is uppercase.
@@ -855,73 +862,9 @@ func toLower(r rune) rune {
 	return r
 }
 
-// hasError checks if the command has an error return.
-func hasError(data CommandData) bool {
-	return data.HasError
-}
-
-// hasResult checks if the command has a result return.
-func hasResult(data CommandData) bool {
-	return data.HasResult
-}
-
-// generateImports generates the import statements based on the command data.
-func generateImports(data CommandData) string {
-	imports := []string{
-		`"fmt"`,
-		`"github.com/spf13/cobra"`,
-	}
-	if data.NeedsTFEImport {
-		imports = append(imports, `"github.com/hashicorp/go-tfe"`)
-	}
-	if data.NeedsIOImport {
-		imports = append(imports, `"io"`)
-	}
-	for _, imp := range data.AdditionalImports {
-		imports = append(imports, imp)
-	}
-	return fmt.Sprintf("import (\n\t%s\n)", strings.Join(imports, "\n\t"))
-}
-
-// generateFlags generates the flag definitions based on the parameters.
-func generateFlags(data CommandData) string {
-	var flags []string
-	for _, param := range data.Parameters {
-		flagName := toSnakeCase(param.Name)
-		switch param.Type {
-		case "string", "tfe.StringOptions":
-			flags = append(flags, fmt.Sprintf(`cmd.Flags().StringP("%s", "s", "", "Description for %s")`, flagName, param.Name))
-		case "int", "tfe.IntOptions":
-			flags = append(flags, fmt.Sprintf(`cmd.Flags().IntP("%s", "i", 0, "Description for %s")`, flagName, param.Name))
-		case "bool", "tfe.BoolOptions":
-			flags = append(flags, fmt.Sprintf(`cmd.Flags().BoolP("%s", "b", false, "Description for %s")`, flagName, param.Name))
-		default:
-			flags = append(flags, fmt.Sprintf(`// TODO: Add flag for %s (%s)`, param.Name, param.Type))
-		}
-	}
-	return strings.Join(flags, "\n\t")
-}
-
-// generateOptionsParsing generates the code to parse options from flags.
-func generateOptionsParsing(data CommandData) string {
-	if !data.NeedsOptions {
-		return ""
-	}
-	var parsing []string
-	for _, field := range data.OptionsFields {
-		flagName := toSnakeCase(field.Name)
-		switch field.Type {
-		case "string", "tfe.StringOptions":
-			parsing = append(parsing, fmt.Sprintf(`options.%s, _ = cmd.Flags().GetString("%s")`, field.Name, flagName))
-		case "int", "tfe.IntOptions":
-			parsing = append(parsing, fmt.Sprintf(`options.%s, _ = cmd.Flags().GetInt("%s")`, field.Name, flagName))
-		case "bool", "tfe.BoolOptions":
-			parsing = append(parsing, fmt.Sprintf(`options.%s, _ = cmd.Flags().GetBool("%s")`, field.Name, flagName))
-		default:
-			parsing = append(parsing, fmt.Sprintf(`// TODO: Parse flag for %s (%s)`, field.Name, field.Type))
-		}
-	}
-	return strings.Join(parsing, "\n\t")
+// toTitleCase converts a string to Title Case.
+func toTitleCase(s string) string {
+	return strings.Title(s)
 }
 
 // printSummary prints a summary of the code generation process.

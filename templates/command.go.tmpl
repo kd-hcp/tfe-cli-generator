@@ -4,20 +4,15 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 	"log"
-
-	{{- if .NeedsTFEImport }}
-	"github.com/hashicorp/go-tfe"
+	"strings"
+	{{- range $import := GenerateImports . }}
+	"{{$import}}"
 	{{- end }}
-	{{- if .NeedsIOImport }}
-	"io"
-	{{- end }}
-	"github.com/spf13/cobra"
 )
 
 var {{ .CommandName }}Cmd = &cobra.Command{
-	Use:   "{{ .CommandName }}",
+	Use:   "{{ .Use }}",
 	Short: "{{ .Short }}",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Initialize context and client
@@ -33,8 +28,8 @@ var {{ .CommandName }}Cmd = &cobra.Command{
 			options *tfe.{{ .OptionsType }}
 			{{- end }}
 			err error
-			{{- if and .HasResult .HasError }}
-			result {{ range .Returns }}{{ if not (eq .Type "error") }}{{ .Type }}{{ end }}{{ end }}
+			{{- if .HasResult }}
+			result {{ (index .Returns 0).Type }}
 			{{- end }}
 		)
 
@@ -55,9 +50,8 @@ var {{ .CommandName }}Cmd = &cobra.Command{
 		}
 		// Convert string to io.Reader or io.Writer as needed
 		{{ if eq .Type "io.Reader" }}
-		{{ .Name }} = stringsNewReader({{ .Name }}Str)
+		{{ .Name }} = strings.NewReader({{ .Name }}Str)
 		{{- else if eq .Type "io.Writer" }}
-		// Example: using os.Stdout as io.Writer
 		{{ .Name }} = os.Stdout
 		{{- end }}
 		{{- else }}
@@ -75,20 +69,30 @@ var {{ .CommandName }}Cmd = &cobra.Command{
 		{{- if .NeedsOptions }}
 		options = &tfe.{{ .OptionsType }}{
 			{{- range .OptionsFields }}
-			{{ .Name }}: {{ .Name }},
+			{{- if strings.HasPrefix .Type "[]" }}
+			// Parse and convert the {{ .Name }} flag to {{ .Type }}
+			{{ .Name }}Str, _ := cmd.Flags().GetString("{{ .Name }}")
+			if {{ .Name }}Str != "" {
+				elements := strings.Split({{ .Name }}Str, ",")
+				options.{{ .Name }} = make({{ .Type }}, len(elements))
+				for i, elem := range elements {
+					options.{{ .Name }}[i] = {{ stripSlicePrefix .Type }}(elem) // Convert each string to the correct type
+				}
+			}
+			{{- else }}
+			{{ .Name }}: {{ getDefaultValueForType .Type }},
+			{{- end }}
 			{{- end }}
 		}
-		// TODO: Parse and assign fields to options struct based on flags
-		log.Printf("Options: %+v", options)
 		{{- end }}
 
 		// Call the API method
-		{{- if and .HasResult .HasError }}
-		result, err = client.{{ .ServiceName }}.{{ .Use }}(ctx{{- range .Parameters }}, {{ .Name }}{{- end }}{{- if .NeedsOptions }}, options{{- end }})
-		{{- else if and (not .HasResult) .HasError }}
-		err = client.{{ .ServiceName }}.{{ .Use }}(ctx{{- range .Parameters }}, {{ .Name }}{{- end }}{{- if .NeedsOptions }}, options{{- end }})
-		{{- else if and .HasResult (not .HasError) }}
-		result = client.{{ .ServiceName }}.{{ .Use }}(ctx{{- range .Parameters }}, {{ .Name }}{{- end }}{{- if .NeedsOptions }}, options{{- end }})
+		{{- if .HasResult }}
+		result, err = client.{{ .ServiceName }}.{{ .Use }}(ctx{{- range .Parameters }}
+		{{- if not (eq .Name "ctx") }}, {{ .Name }}{{- end }}{{- end }}{{- if .NeedsOptions }}, options{{- end }})
+		{{- else }}
+		err = client.{{ .ServiceName }}.{{ .Use }}(ctx{{- range .Parameters }}
+		{{- if not (eq .Name "ctx") }}, {{ .Name }}{{- end }}{{- end }}{{- if .NeedsOptions }}, options{{- end }})
 		{{- end }}
 		if err != nil {
 			log.Printf("API call failed: %v", err)
@@ -123,8 +127,6 @@ func init() {
 	{{- else }}
 	// Handle non-basic types
 	// TODO: Implement flag parsing for {{ .Name }} of type {{ .Type }}
-	// Example:
-	// {{ $cmdName }}Cmd.Flags().String("{{ .Name }}", "", "Description for {{ .Name }}")
 	{{- end }}
 	{{- end }}
 
@@ -136,14 +138,9 @@ func init() {
 	{{ $cmdName }}Cmd.Flags().Int("{{ .Name }}", 0, "Description for {{ .Name }}")
 	{{- else if eq .Type "bool" }}
 	{{ $cmdName }}Cmd.Flags().Bool("{{ .Name }}", false, "Description for {{ .Name }}")
-	{{- else if .IsIO }}
-	// Example for io.Reader or io.Writer within Options
-	{{ $cmdName }}Cmd.Flags().String("{{ .Name }}", "", "Description for {{ .Name }} (expects a file path)")
 	{{- else }}
 	// Handle non-basic types within Options
 	// TODO: Implement flag parsing for {{ .Name }} of type {{ .Type }}
-	// Example:
-	// {{ $cmdName }}Cmd.Flags().String("{{ .Name }}", "", "Description for {{ .Name }}")
 	{{- end }}
 	{{- end }}
 	{{- end }}
